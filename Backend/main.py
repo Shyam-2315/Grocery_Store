@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime, timezone
 from typing import List
 
 # Import local modules
@@ -51,16 +51,20 @@ def signup(payload: schemas.SignupRequest, db: Session = Depends(database.get_db
             raise HTTPException(status_code=400, detail="Store Code already taken")
 
     # 3. Create the Tenant (Store) Record
-    new_tenant = models.Tenant(
-        business_name=payload.store_name,
-        store_code=payload.store_code,  # Model handles auto-generation if None
-        contact_phone=payload.contact_phone,
-        address=payload.address,
-        city=payload.city,
-        state=payload.state,
-        registration_number=payload.registration_number,
-        plan_id=payload.plan_id
-    )
+    # Only set store_code if provided, otherwise it will be auto-generated
+    tenant_data = {
+        "business_name": payload.store_name,
+        "contact_phone": payload.contact_phone,
+        "address": payload.address,
+        "city": payload.city,
+        "state": payload.state,
+        "registration_number": payload.registration_number,
+        "plan_id": payload.plan_id
+    }
+    if payload.store_code:
+        tenant_data["store_code"] = payload.store_code
+    
+    new_tenant = models.Tenant(**tenant_data)
     db.add(new_tenant)
     db.commit()
     db.refresh(new_tenant)
@@ -138,7 +142,7 @@ def login(payload: schemas.LoginRequest, db: Session = Depends(database.get_db))
     # Reset security counters & Update login time
     user.failed_login_attempts = 0
     user.is_locked = False
-    user.last_login = datetime.utcnow()
+    user.last_login = datetime.now(timezone.utc)
     db.commit()
     
     # Generate Token
@@ -209,3 +213,82 @@ def create_product(
     db.commit()
     db.refresh(new_product)
     return new_product
+
+# ==========================================
+# TRANSACTION ENDPOINTS (POS) - NEW SECTION
+# ==========================================
+
+@app.post("/api/v1/transactions/create", response_model=schemas.TransactionResponse)
+def create_transaction(
+    payload: schemas.TransactionCreate,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Process a Sale:
+    1. Calculate Total
+    2. Deduct Stock
+    3. Save Transaction
+    """
+    total_amount = 0.0
+    transaction_items = []
+
+    # 1. Validate Items & Calculate Total
+    for item in payload.items:
+        # Fetch fresh product data to ensure price/stock is correct
+        # Also verify product belongs to the current user's tenant
+        product_db = db.query(models.Product).filter(
+            models.Product.id == item.product_id,
+            models.Product.tenant_id == current_user.tenant_id
+        ).first()
+        
+        if not product_db:
+            raise HTTPException(status_code=404, detail=f"Product {item.product_name} not found")
+        
+        # Check if enough stock exists
+        if product_db.stock_quantity < item.quantity:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Not enough stock for {product_db.name}. Available: {product_db.stock_quantity}"
+            )
+
+        # Deduct Stock
+        product_db.stock_quantity -= item.quantity
+        
+        # Calculate Line Total
+        line_total = product_db.selling_price * item.quantity
+        total_amount += line_total
+        
+        # Prepare Item Record for Database
+        transaction_items.append(models.TransactionItem(
+            product_id=product_db.id,
+            product_name=product_db.name,
+            quantity=item.quantity,
+            unit_price=product_db.selling_price,
+            total_price=line_total
+        ))
+
+    # 2. Create Transaction Record
+    new_txn = models.Transaction(
+        tenant_id=current_user.tenant_id,
+        user_id=current_user.id,
+        total_amount=total_amount,
+        payment_method=payload.payment_method
+    )
+    db.add(new_txn)
+    db.commit()
+    db.refresh(new_txn)
+
+    # 3. Save Items Linked to Transaction
+    for txn_item in transaction_items:
+        txn_item.transaction_id = new_txn.id
+        db.add(txn_item)
+    
+    db.commit()
+
+    return {
+        "id": new_txn.id, 
+        "total_amount": total_amount, 
+        "created_at": new_txn.created_at,
+        "message": "Sale successful"
+    }

@@ -1,3 +1,4 @@
+from datetime import datetime
 from pydantic import BaseModel, EmailStr, validator
 from typing import Optional, List
 import re
@@ -96,3 +97,24 @@ class ProductResponse(ProductBase):
 
     class Config:
         from_attributes = True
+
+# ... existing imports ...
+
+# --- TRANSACTION SCHEMAS ---
+class CartItem(BaseModel):
+    product_id: int
+    product_name: str
+    quantity: int
+    unit_price: float
+    # We calculate line total in backend to be safe
+
+class TransactionCreate(BaseModel):
+    items: List[CartItem]
+    payment_method: str
+    # Total is calculated on backend for security
+
+class TransactionResponse(BaseModel):
+    id: int
+    total_amount: float
+    created_at: datetime
+    message: str        

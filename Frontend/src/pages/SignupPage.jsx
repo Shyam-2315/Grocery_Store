@@ -39,14 +39,13 @@ const SignupPage = () => {
     }
 
     try {
+      // Exclude confirm_password before sending
+      const { confirm_password, ...signupData } = formData;
+      
       const response = await fetch('http://127.0.0.1:8000/api/v1/auth/signup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // Exclude confirm_password before sending
-        body: JSON.stringify({
-           ...formData,
-           confirm_password: undefined 
-        }),
+        body: JSON.stringify(signupData),
       });
 
       const data = await response.json();
