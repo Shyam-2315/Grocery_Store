@@ -13,6 +13,9 @@ import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/Dashboard';
 import InventoryPage from './pages/InventoryPage';
 import PosPage from './pages/PosPage';
+import ReportsPage from './pages/ReportsPage';
+import CustomersPage from './pages/CustomersPage';
+import CategoriesPage from './pages/CategoriesPage';
 
 // Protected Route Component
 const ProtectedRoute = () => {
@@ -41,11 +44,10 @@ function App() {
         <Route element={<DashboardLayout />}>
           <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/inventory" element={<InventoryPage />} />
+          <Route path="/categories" element={<CategoriesPage />} />
           <Route path="/pos" element={<PosPage />} />
-          
-          {/* Placeholder for future pages */}
-          <Route path="/customers" element={<h2>Customer Management Coming Soon</h2>} />
-          <Route path="/reports" element={<h2>Sales Reports Coming Soon</h2>} />
+          <Route path="/reports" element={<ReportsPage />} />
+          <Route path="/customers" element={<CustomersPage />} />
         </Route>
       </Route>
 

@@ -1,8 +1,11 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import func, and_
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import timedelta, datetime, timezone
-from typing import List
+from datetime import timedelta, datetime, timezone, date
+from typing import List, Optional
 
 # Import local modules
 import models
@@ -15,7 +18,38 @@ import auth
 # This creates the tables in PostgreSQL if they don't exist
 models.Base.metadata.create_all(bind=database.engine)
 
+# 2. Run database migration if needed (only once, safe to run multiple times)
+try:
+    from migrate_database import migrate_database
+    print("Running database migration...")
+    migrate_database()
+except ImportError:
+    print("Migration script not found, skipping...")
+except Exception as e:
+    print(f"Migration completed or already done: {str(e)[:100]}")
+    # Continue - migration might already be done
+
 app = FastAPI(title="GroceryPOS Pro API", version="1.0.0")
+
+# Custom exception handler for validation errors
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Better error messages for validation errors"""
+    errors = exc.errors()
+    error_details = []
+    for error in errors:
+        error_details.append({
+            "field": ".".join(str(x) for x in error.get("loc", [])),
+            "message": error.get("msg"),
+            "type": error.get("type")
+        })
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": error_details,
+            "message": "Validation error. Please check your input data."
+        }
+    )
 
 # 2. CORS Configuration (Allow Frontend to talk to Backend)
 app.add_middleware(
@@ -180,13 +214,39 @@ def login(payload: schemas.LoginRequest, db: Session = Depends(database.get_db))
 
 @app.get("/api/v1/products", response_model=List[schemas.ProductResponse])
 def get_products(
+    barcode: Optional[str] = None,
     db: Session = Depends(database.get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
     """
     Get all products belonging to the logged-in user's store (Tenant).
+    Optionally filter by barcode.
     """
-    return db.query(models.Product).filter(models.Product.tenant_id == current_user.tenant_id).all()
+    query = db.query(models.Product).filter(models.Product.tenant_id == current_user.tenant_id)
+    
+    # Filter by barcode if provided
+    if barcode:
+        query = query.filter(models.Product.barcode == barcode)
+    
+    products = query.all()
+    
+    # Add category_name to each product
+    result = []
+    for product in products:
+        product_dict = {
+            "id": product.id,
+            "name": product.name,
+            "barcode": product.barcode,
+            "category_id": product.category_id,
+            "cost_price": product.cost_price,
+            "selling_price": product.selling_price,
+            "stock_quantity": product.stock_quantity,
+            "min_stock_level": product.min_stock_level,
+            "tenant_id": product.tenant_id,
+            "category_name": product.category.name if product.category else None
+        }
+        result.append(product_dict)
+    return result
 
 @app.post("/api/v1/products", response_model=schemas.ProductResponse)
 def create_product(
@@ -197,11 +257,20 @@ def create_product(
     """
     Add a new product to the inventory.
     """
+    # Verify category belongs to tenant if provided
+    if product.category_id is not None and product.category_id != 0:
+        category = db.query(models.Category).filter(
+            models.Category.id == product.category_id,
+            models.Category.tenant_id == current_user.tenant_id
+        ).first()
+        if not category:
+            raise HTTPException(status_code=404, detail="Category not found")
+    
     # Create the product linked to the current user's tenant
     new_product = models.Product(
         name=product.name,
         barcode=product.barcode,
-        category=product.category,
+        category_id=product.category_id,
         cost_price=product.cost_price,
         selling_price=product.selling_price,
         stock_quantity=product.stock_quantity,
@@ -212,7 +281,298 @@ def create_product(
     db.add(new_product)
     db.commit()
     db.refresh(new_product)
-    return new_product
+    
+    # Add category name to response
+    response_data = {
+        **new_product.__dict__,
+        "category_name": new_product.category.name if new_product.category else None
+    }
+    return response_data
+
+@app.put("/api/v1/products/{product_id}", response_model=schemas.ProductResponse)
+def update_product(
+    product_id: int,
+    product_update: schemas.ProductUpdate,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Update an existing product. Only updates provided fields.
+    """
+    # Find product and verify it belongs to the user's tenant
+    product = db.query(models.Product).filter(
+        models.Product.id == product_id,
+        models.Product.tenant_id == current_user.tenant_id
+    ).first()
+    
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    
+    # Verify category belongs to tenant if provided
+    update_dict = product_update.dict(exclude_unset=True)
+    if 'category_id' in update_dict and product_update.category_id is not None and product_update.category_id != 0:
+        category = db.query(models.Category).filter(
+            models.Category.id == product_update.category_id,
+            models.Category.tenant_id == current_user.tenant_id
+        ).first()
+        if not category:
+            raise HTTPException(status_code=404, detail="Category not found")
+    
+    # Update only provided fields
+    update_data = product_update.dict(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(product, field, value)
+    
+    db.commit()
+    db.refresh(product)
+    
+    # Add category name to response
+    response_data = {
+        **product.__dict__,
+        "category_name": product.category.name if product.category else None
+    }
+    return response_data
+
+@app.delete("/api/v1/products/{product_id}")
+def delete_product(
+    product_id: int,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Delete a product from the inventory.
+    """
+    # Find product and verify it belongs to the user's tenant
+    product = db.query(models.Product).filter(
+        models.Product.id == product_id,
+        models.Product.tenant_id == current_user.tenant_id
+    ).first()
+    
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    
+    db.delete(product)
+    db.commit()
+    return {"message": "Product deleted successfully"}
+
+@app.get("/api/v1/products/by-barcode/{barcode}", response_model=schemas.ProductResponse)
+def get_product_by_barcode(
+    barcode: str,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """Get a product by barcode - useful for barcode scanner."""
+    product = db.query(models.Product).filter(
+        models.Product.barcode == barcode,
+        models.Product.tenant_id == current_user.tenant_id
+    ).first()
+    
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    
+    product_dict = {
+        "id": product.id,
+        "name": product.name,
+        "barcode": product.barcode,
+        "category_id": product.category_id,
+        "cost_price": product.cost_price,
+        "selling_price": product.selling_price,
+        "stock_quantity": product.stock_quantity,
+        "min_stock_level": product.min_stock_level,
+        "tenant_id": product.tenant_id,
+        "category_name": product.category.name if product.category else None
+    }
+    return product_dict
+
+# ==========================================
+# CATEGORY ENDPOINTS
+# ==========================================
+
+@app.get("/api/v1/categories", response_model=List[schemas.CategoryResponse])
+def get_categories(
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """Get all categories for the current tenant."""
+    return db.query(models.Category).filter(
+        models.Category.tenant_id == current_user.tenant_id
+    ).all()
+
+@app.post("/api/v1/categories", response_model=schemas.CategoryResponse)
+def create_category(
+    category: schemas.CategoryCreate,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """Create a new category."""
+    new_category = models.Category(
+        name=category.name,
+        description=category.description,
+        tenant_id=current_user.tenant_id
+    )
+    db.add(new_category)
+    db.commit()
+    db.refresh(new_category)
+    return new_category
+
+@app.put("/api/v1/categories/{category_id}", response_model=schemas.CategoryResponse)
+def update_category(
+    category_id: int,
+    category_update: schemas.CategoryCreate,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """Update a category."""
+    category = db.query(models.Category).filter(
+        models.Category.id == category_id,
+        models.Category.tenant_id == current_user.tenant_id
+    ).first()
+    
+    if not category:
+        raise HTTPException(status_code=404, detail="Category not found")
+    
+    category.name = category_update.name
+    category.description = category_update.description
+    db.commit()
+    db.refresh(category)
+    return category
+
+@app.delete("/api/v1/categories/{category_id}")
+def delete_category(
+    category_id: int,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """Delete a category."""
+    category = db.query(models.Category).filter(
+        models.Category.id == category_id,
+        models.Category.tenant_id == current_user.tenant_id
+    ).first()
+    
+    if not category:
+        raise HTTPException(status_code=404, detail="Category not found")
+    
+    # Check if any products use this category
+    products_count = db.query(models.Product).filter(
+        models.Product.category_id == category_id
+    ).count()
+    
+    if products_count > 0:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cannot delete category. {products_count} product(s) are using it."
+        )
+    
+    db.delete(category)
+    db.commit()
+    return {"message": "Category deleted successfully"}
+
+# ==========================================
+# CUSTOMER ENDPOINTS
+# ==========================================
+
+@app.get("/api/v1/customers", response_model=List[schemas.CustomerResponse])
+def get_customers(
+    skip: int = 0,
+    limit: int = 100,
+    search: Optional[str] = None,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """Get all customers for the current tenant."""
+    query = db.query(models.Customer).filter(
+        models.Customer.tenant_id == current_user.tenant_id
+    )
+    
+    if search:
+        query = query.filter(
+            (models.Customer.name.ilike(f"%{search}%")) |
+            (models.Customer.phone.ilike(f"%{search}%")) |
+            (models.Customer.email.ilike(f"%{search}%"))
+        )
+    
+    return query.order_by(models.Customer.name).offset(skip).limit(limit).all()
+
+@app.post("/api/v1/customers", response_model=schemas.CustomerResponse)
+def create_customer(
+    customer: schemas.CustomerCreate,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """Create a new customer."""
+    new_customer = models.Customer(
+        name=customer.name,
+        email=customer.email,
+        phone=customer.phone,
+        address=customer.address,
+        city=customer.city,
+        state=customer.state,
+        tenant_id=current_user.tenant_id
+    )
+    db.add(new_customer)
+    db.commit()
+    db.refresh(new_customer)
+    return new_customer
+
+@app.put("/api/v1/customers/{customer_id}", response_model=schemas.CustomerResponse)
+def update_customer(
+    customer_id: int,
+    customer_update: schemas.CustomerUpdate,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """Update a customer."""
+    customer = db.query(models.Customer).filter(
+        models.Customer.id == customer_id,
+        models.Customer.tenant_id == current_user.tenant_id
+    ).first()
+    
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    
+    update_data = customer_update.dict(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(customer, field, value)
+    
+    db.commit()
+    db.refresh(customer)
+    return customer
+
+@app.delete("/api/v1/customers/{customer_id}")
+def delete_customer(
+    customer_id: int,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """Delete a customer."""
+    customer = db.query(models.Customer).filter(
+        models.Customer.id == customer_id,
+        models.Customer.tenant_id == current_user.tenant_id
+    ).first()
+    
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    
+    db.delete(customer)
+    db.commit()
+    return {"message": "Customer deleted successfully"}
+
+@app.get("/api/v1/customers/{customer_id}", response_model=schemas.CustomerResponse)
+def get_customer(
+    customer_id: int,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """Get a specific customer."""
+    customer = db.query(models.Customer).filter(
+        models.Customer.id == customer_id,
+        models.Customer.tenant_id == current_user.tenant_id
+    ).first()
+    
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    
+    return customer
 
 # ==========================================
 # TRANSACTION ENDPOINTS (POS) - NEW SECTION
@@ -226,14 +586,27 @@ def create_transaction(
 ):
     """
     Process a Sale:
-    1. Calculate Total
-    2. Deduct Stock
-    3. Save Transaction
+    1. Validate Customer (if provided)
+    2. Calculate Subtotal
+    3. Apply Discount (if provided)
+    4. Deduct Stock
+    5. Save Transaction
+    6. Update Customer Stats
     """
-    total_amount = 0.0
+    subtotal = 0.0
     transaction_items = []
 
-    # 1. Validate Items & Calculate Total
+    # 1. Validate Customer if provided
+    customer = None
+    if payload.customer_id:
+        customer = db.query(models.Customer).filter(
+            models.Customer.id == payload.customer_id,
+            models.Customer.tenant_id == current_user.tenant_id
+        ).first()
+        if not customer:
+            raise HTTPException(status_code=404, detail="Customer not found")
+
+    # 2. Validate Items & Calculate Subtotal
     for item in payload.items:
         # Fetch fresh product data to ensure price/stock is correct
         # Also verify product belongs to the current user's tenant
@@ -257,7 +630,7 @@ def create_transaction(
         
         # Calculate Line Total
         line_total = product_db.selling_price * item.quantity
-        total_amount += line_total
+        subtotal += line_total
         
         # Prepare Item Record for Database
         transaction_items.append(models.TransactionItem(
@@ -268,10 +641,31 @@ def create_transaction(
             total_price=line_total
         ))
 
-    # 2. Create Transaction Record
+    # 3. Calculate Discount
+    discount_amount = 0.0
+    if payload.discount_type and payload.discount_value:
+        if payload.discount_type == 'percentage':
+            if payload.discount_value < 0 or payload.discount_value > 100:
+                raise HTTPException(status_code=400, detail="Discount percentage must be between 0 and 100")
+            discount_amount = subtotal * (payload.discount_value / 100)
+        elif payload.discount_type == 'fixed':
+            if payload.discount_value < 0:
+                raise HTTPException(status_code=400, detail="Discount amount cannot be negative")
+            discount_amount = min(payload.discount_value, subtotal)  # Can't discount more than subtotal
+        else:
+            raise HTTPException(status_code=400, detail="Invalid discount type. Use 'percentage' or 'fixed'")
+
+    total_amount = subtotal - discount_amount
+
+    # 4. Create Transaction Record
     new_txn = models.Transaction(
         tenant_id=current_user.tenant_id,
         user_id=current_user.id,
+        customer_id=payload.customer_id,
+        subtotal=subtotal,
+        discount_amount=discount_amount,
+        discount_type=payload.discount_type,
+        discount_value=payload.discount_value,
         total_amount=total_amount,
         payment_method=payload.payment_method
     )
@@ -279,11 +673,19 @@ def create_transaction(
     db.commit()
     db.refresh(new_txn)
 
-    # 3. Save Items Linked to Transaction
+    # 5. Save Items Linked to Transaction
     for txn_item in transaction_items:
         txn_item.transaction_id = new_txn.id
         db.add(txn_item)
     
+    # 6. Update Customer Stats if customer exists
+    if customer:
+        customer.total_purchases += total_amount
+        customer.last_purchase_date = datetime.now(timezone.utc)
+        # Award loyalty points (1 point per dollar spent)
+        customer.loyalty_points += int(total_amount)
+        db.commit()
+
     db.commit()
 
     return {
@@ -291,4 +693,183 @@ def create_transaction(
         "total_amount": total_amount, 
         "created_at": new_txn.created_at,
         "message": "Sale successful"
+    }
+
+@app.get("/api/v1/transactions", response_model=List[schemas.TransactionDetailResponse])
+def get_transactions(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Get transaction history for the current tenant.
+    """
+    transactions = db.query(models.Transaction).filter(
+        models.Transaction.tenant_id == current_user.tenant_id
+    ).order_by(models.Transaction.created_at.desc()).offset(skip).limit(limit).all()
+    
+    return transactions
+
+@app.get("/api/v1/transactions/{transaction_id}", response_model=schemas.TransactionDetailResponse)
+def get_transaction(
+    transaction_id: int,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Get detailed information about a specific transaction.
+    """
+    transaction = db.query(models.Transaction).filter(
+        models.Transaction.id == transaction_id,
+        models.Transaction.tenant_id == current_user.tenant_id
+    ).first()
+    
+    if not transaction:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    
+    # Add customer name to response
+    response_data = {
+        **transaction.__dict__,
+        "customer_name": transaction.customer.name if transaction.customer else None
+    }
+    return response_data
+
+# ==========================================
+# ANALYTICS ENDPOINTS
+# ==========================================
+
+@app.get("/api/v1/analytics/dashboard", response_model=schemas.DashboardStats)
+def get_dashboard_stats(
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Get dashboard statistics: today's sales, transactions, low stock items, etc.
+    """
+    today = date.today()
+    today_start = datetime.combine(today, datetime.min.time()).replace(tzinfo=timezone.utc)
+    today_end = datetime.combine(today, datetime.max.time()).replace(tzinfo=timezone.utc)
+    
+    # Today's sales and transactions
+    today_stats = db.query(
+        func.sum(models.Transaction.total_amount).label('total_sales'),
+        func.count(models.Transaction.id).label('transaction_count')
+    ).filter(
+        and_(
+            models.Transaction.tenant_id == current_user.tenant_id,
+            models.Transaction.created_at >= today_start,
+            models.Transaction.created_at <= today_end
+        )
+    ).first()
+    
+    today_sales = float(today_stats.total_sales or 0)
+    today_transactions = int(today_stats.transaction_count or 0)
+    
+    # Monthly stats (current month)
+    month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    monthly_stats = db.query(
+        func.sum(models.Transaction.total_amount).label('total_sales'),
+        func.count(models.Transaction.id).label('transaction_count')
+    ).filter(
+        and_(
+            models.Transaction.tenant_id == current_user.tenant_id,
+            models.Transaction.created_at >= month_start
+        )
+    ).first()
+    
+    monthly_sales = float(monthly_stats.total_sales or 0)
+    monthly_transactions = int(monthly_stats.transaction_count or 0)
+    
+    # Low stock items
+    low_stock_count = db.query(models.Product).filter(
+        and_(
+            models.Product.tenant_id == current_user.tenant_id,
+            models.Product.stock_quantity <= models.Product.min_stock_level
+        )
+    ).count()
+    
+    # Total products
+    total_products = db.query(models.Product).filter(
+        models.Product.tenant_id == current_user.tenant_id
+    ).count()
+    
+    return {
+        "today_sales": today_sales,
+        "today_transactions": today_transactions,
+        "low_stock_items": low_stock_count,
+        "total_products": total_products,
+        "monthly_sales": monthly_sales,
+        "monthly_transactions": monthly_transactions
+    }
+
+@app.get("/api/v1/analytics/sales", response_model=List[schemas.SalesAnalytics])
+def get_sales_analytics(
+    days: int = 30,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Get daily sales analytics for the last N days.
+    """
+    start_date = datetime.now(timezone.utc) - timedelta(days=days)
+    
+    # Group transactions by date
+    daily_sales = db.query(
+        func.date(models.Transaction.created_at).label('date'),
+        func.sum(models.Transaction.total_amount).label('total_sales'),
+        func.count(models.Transaction.id).label('transaction_count')
+    ).filter(
+        and_(
+            models.Transaction.tenant_id == current_user.tenant_id,
+            models.Transaction.created_at >= start_date
+        )
+    ).group_by(func.date(models.Transaction.created_at)).order_by('date').all()
+    
+    result = []
+    for row in daily_sales:
+        result.append({
+            "date": row.date.isoformat() if isinstance(row.date, date) else str(row.date),
+            "total_sales": float(row.total_sales or 0),
+            "transaction_count": int(row.transaction_count or 0)
+        })
+    
+    return result
+
+# ==========================================
+# RECEIPT ENDPOINTS
+# ==========================================
+
+@app.get("/api/v1/transactions/{transaction_id}/receipt", response_model=schemas.ReceiptData)
+def get_receipt(
+    transaction_id: int,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Get receipt data for printing.
+    """
+    transaction = db.query(models.Transaction).filter(
+        models.Transaction.id == transaction_id,
+        models.Transaction.tenant_id == current_user.tenant_id
+    ).first()
+    
+    if not transaction:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    
+    tenant = current_user.tenant
+    
+    return {
+        "transaction_id": transaction.id,
+        "store_name": tenant.business_name,
+        "store_address": f"{tenant.address}, {tenant.city}, {tenant.state}",
+        "store_phone": tenant.contact_phone,
+        "transaction_date": transaction.created_at,
+        "items": transaction.items,
+        "subtotal": transaction.subtotal,
+        "discount_amount": transaction.discount_amount,
+        "total_amount": transaction.total_amount,
+        "payment_method": transaction.payment_method,
+        "customer_name": transaction.customer.name if transaction.customer else None,
+        "cashier_name": f"{current_user.first_name} {current_user.last_name}"
     }

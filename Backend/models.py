@@ -29,6 +29,8 @@ class Tenant(Base):
     
     users = relationship("User", back_populates="tenant")
     products = relationship("Product", back_populates="tenant")
+    customers = relationship("Customer", back_populates="tenant")
+    categories = relationship("Category", back_populates="tenant")
 
 class User(Base):
     __tablename__ = "users"
@@ -50,14 +52,28 @@ class User(Base):
     
     tenant_id = Column(Integer, ForeignKey("tenants.id"))
     tenant = relationship("Tenant", back_populates="users")
+    transactions = relationship("Transaction", back_populates="cashier")
+
+class Category(Base):
+    __tablename__ = "categories"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False, index=True)
+    description = Column(String, nullable=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"))
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    
+    tenant = relationship("Tenant", back_populates="categories")
+    products = relationship("Product", back_populates="category")
 
 class Product(Base):
     __tablename__ = "products"
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True, nullable=False)
-    barcode = Column(String, index=True, nullable=True)
-    category = Column(String, index=True)
+    barcode = Column(String, index=True, nullable=True, unique=False)  # Allow duplicates for now
+    category_id = Column(Integer, ForeignKey("categories.id"), nullable=True)
+    category = relationship("Category", back_populates="products")
     
     cost_price = Column(Float)  
     selling_price = Column(Float, nullable=False) 
@@ -70,20 +86,46 @@ class Product(Base):
    
 # ... existing imports ...
 
+class Customer(Base):
+    __tablename__ = "customers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False, index=True)
+    email = Column(String, nullable=True, index=True)
+    phone = Column(String, nullable=True, index=True)
+    address = Column(String, nullable=True)
+    city = Column(String, nullable=True)
+    state = Column(String, nullable=True)
+    loyalty_points = Column(Integer, default=0)
+    total_purchases = Column(Float, default=0.0)
+    last_purchase_date = Column(DateTime, nullable=True)
+    
+    tenant_id = Column(Integer, ForeignKey("tenants.id"))
+    tenant = relationship("Tenant", back_populates="customers")
+    transactions = relationship("Transaction", back_populates="customer")
+    
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
 class Transaction(Base):
     __tablename__ = "transactions"
 
     id = Column(Integer, primary_key=True, index=True)
     tenant_id = Column(Integer, ForeignKey("tenants.id"))
     user_id = Column(Integer, ForeignKey("users.id")) # Cashier
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True)
     
+    subtotal = Column(Float, nullable=False)
+    discount_amount = Column(Float, default=0.0)
+    discount_type = Column(String, nullable=True) # 'percentage' or 'fixed'
+    discount_value = Column(Float, nullable=True)
     total_amount = Column(Float, nullable=False)
     payment_method = Column(String, default="cash") # cash, card, upi
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     
     # Relationships
     items = relationship("TransactionItem", back_populates="transaction")
-    user = relationship("User")
+    cashier = relationship("User", back_populates="transactions")
+    customer = relationship("Customer", back_populates="transactions")
 
 # Event listener to auto-generate store_code if None
 @event.listens_for(Tenant, 'before_insert')

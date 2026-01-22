@@ -26,6 +26,7 @@ import {
   Menu as MenuIcon,
   Logout,
   AccountCircle,
+  Category,
 } from '@mui/icons-material';
 
 const drawerWidth = 240;
@@ -33,6 +34,7 @@ const drawerWidth = 240;
 const menuItems = [
   { text: 'Dashboard', icon: <Dashboard />, path: '/dashboard' },
   { text: 'Inventory', icon: <Inventory />, path: '/inventory' },
+  { text: 'Categories', icon: <Category />, path: '/categories' },
   { text: 'POS Terminal', icon: <ShoppingCart />, path: '/pos' },
   { text: 'Customers', icon: <People />, path: '/customers' },
   { text: 'Reports', icon: <TrendingUp />, path: '/reports' },
