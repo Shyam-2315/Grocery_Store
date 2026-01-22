@@ -41,11 +41,11 @@ function App() {
 
       {/* --- PROTECTED ROUTES (With Sidebar & Header) --- */}
       <Route element={<ProtectedRoute />}>
-        <Route element={<DashboardLayout />}>
-          <Route path="/dashboard" element={<DashboardPage />} />
-          <Route path="/inventory" element={<InventoryPage />} />
+      <Route element={<DashboardLayout />}>
+        <Route path="/dashboard" element={<DashboardPage />} />
+        <Route path="/inventory" element={<InventoryPage />} />
           <Route path="/categories" element={<CategoriesPage />} />
-          <Route path="/pos" element={<PosPage />} />
+        <Route path="/pos" element={<PosPage />} />
           <Route path="/reports" element={<ReportsPage />} />
           <Route path="/customers" element={<CustomersPage />} />
         </Route>

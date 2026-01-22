@@ -7,11 +7,13 @@ from sqlalchemy.orm import Session
 import models
 import database
 
-# CONFIGURATION
-# In a real app, keep this secret!
-SECRET_KEY = "grocery_pos_super_secret_key_2024"
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
+# Import settings
+from config import settings
+
+# CONFIGURATION - Now loaded from environment variables
+SECRET_KEY = settings.SECRET_KEY
+ALGORITHM = settings.ALGORITHM
+ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
 
 # This tells FastAPI that the token comes from the /login endpoint
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/v1/auth/login")

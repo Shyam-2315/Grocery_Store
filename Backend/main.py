@@ -2,10 +2,18 @@ from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_
+from sqlalchemy import func, and_, text
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import timedelta, datetime, timezone, date
 from typing import List, Optional
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Import local modules
 import models
@@ -13,6 +21,7 @@ import schemas
 import utils
 import database
 import auth
+from config import settings
 
 # 1. Initialize Database Tables
 # This creates the tables in PostgreSQL if they don't exist
@@ -29,7 +38,17 @@ except Exception as e:
     print(f"Migration completed or already done: {str(e)[:100]}")
     # Continue - migration might already be done
 
-app = FastAPI(title="GroceryPOS Pro API", version="1.0.0")
+app = FastAPI(
+    title="GroceryPOS Pro API",
+    version="1.0.0",
+    description="Complete POS system for grocery stores",
+    docs_url="/docs" if settings.DEBUG else None,  # Disable docs in production
+    redoc_url="/redoc" if settings.DEBUG else None
+)
+
+# Add logging middleware
+from middleware import LoggingMiddleware
+app.add_middleware(LoggingMiddleware)
 
 # Custom exception handler for validation errors
 @app.exception_handler(RequestValidationError)
@@ -54,7 +73,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # 2. CORS Configuration (Allow Frontend to talk to Backend)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"], 
+    allow_origins=settings.CORS_ORIGINS, 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -62,7 +81,47 @@ app.add_middleware(
 
 @app.get("/")
 def read_root():
-    return {"message": "GroceryPOS Backend is Online with PostgreSQL"}
+    return {
+        "message": "GroceryPOS Backend is Online",
+        "version": "1.0.0",
+        "status": "healthy"
+    }
+
+@app.get("/health")
+def health_check():
+    """Health check endpoint for monitoring and load balancers"""
+    try:
+        # Test database connection
+        db = next(database.get_db())
+        db.execute(text("SELECT 1"))
+        db.close()
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "version": "1.0.0",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "status": "unhealthy",
+                "database": "disconnected",
+                "error": str(e) if settings.DEBUG else "Service unavailable",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        )
+
+@app.get("/api/v1/info")
+def get_api_info():
+    """Get API information"""
+    return {
+        "name": "GroceryPOS Pro API",
+        "version": "1.0.0",
+        "environment": settings.ENVIRONMENT,
+        "docs": "/docs" if settings.DEBUG else "disabled"
+    }
 
 # ==========================================
 # AUTHENTICATION ENDPOINTS
