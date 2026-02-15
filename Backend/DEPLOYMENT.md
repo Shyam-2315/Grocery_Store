@@ -3,12 +3,12 @@
 ## Pre-Deployment Checklist
 
 ### 1. Security
-- [ ] Change `SECRET_KEY` to a strong random string (use: `python -c "import secrets; print(secrets.token_urlsafe(32))"`)
-- [ ] Set `DEBUG=False` in `.env`
-- [ ] Update `CORS_ORIGINS` with production frontend URL
-- [ ] Use strong PostgreSQL password
-- [ ] Enable HTTPS/SSL certificates
-- [ ] Set up firewall (only allow necessary ports)
+- [Dn] Change `SECRET_KEY` to a strong random string (use: `python -c "import secrets; print(secrets.token_urlsafe(32))"`)
+- [Dn] Set `DEBUG=False` in `.env`
+- [Dn] Update `CORS_ORIGINS` with production frontend URL
+- [Dn] Use strong PostgreSQL password
+- [Dn] Enable HTTPS/SSL certificates
+- [Dn] Set up firewall (only allow necessary ports)
 
 ### 2. Database
 - [ ] Run migration: `python migrate_database.py`
